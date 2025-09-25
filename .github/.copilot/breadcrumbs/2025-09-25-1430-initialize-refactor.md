@@ -466,4 +466,67 @@ func removeWaitTimeFromUpdateRunStatus(updateRun placementv1beta1.StagedUpdateRu
 - ✅ `computeRunStageStatus`: Fully generic, uses interface-based access patterns
 - ✅ `generateStagesByStrategy`: Fully generic, uses interface-based access patterns and new strategy resolver utility
 - ✅ `removeWaitTimeFromUpdateRunStatus`: Fully generic utility function using interface-based approach
+
+### Phase 10: recordOverrideSnapshots Refactor ✅
+
+**Target**: `recordOverrideSnapshots` function - records override snapshots for each cluster in staged update run
+
+**Implementation**: Updated from concrete type to interface-based approach with resource snapshot resolver utilities:
+
+**Before**:
+```go
+func (r *Reconciler) recordOverrideSnapshots(ctx context.Context, placementName string, updateRun *placementv1beta1.ClusterStagedUpdateRun) error {
+	// Direct field access
+	snapshotIndex, err := strconv.Atoi(updateRun.Spec.ResourceSnapshotIndex)
+	
+	// Manual ClusterResourceSnapshot listing
+	var masterResourceSnapshot *placementv1beta1.ClusterResourceSnapshot
+	labelMatcher := client.MatchingLabels{...}
+	resourceSnapshotList := &placementv1beta1.ClusterResourceSnapshotList{}
+	err := r.Client.List(ctx, resourceSnapshotList, labelMatcher)
+	
+	// Direct status access
+	for _, stageStatus := range updateRun.Status.StagesStatus {
+		// Direct field modification
+	}
+}
+```
+
+**After**:
+```go
+func (r *Reconciler) recordOverrideSnapshots(ctx context.Context, placementKey types.NamespacedName, updateRun placementv1beta1.StagedUpdateRunObj) error {
+	// Interface-based access
+	updateRunSpec := updateRun.GetStagedUpdateRunSpec()
+	snapshotIndex, err := strconv.Atoi(updateRunSpec.ResourceSnapshotIndex)
+	
+	// Generic utility function handles type determination
+	resourceSnapshotList, err := controller.ListAllResourceSnapshotWithAnIndex(ctx, r.Client, updateRunSpec.ResourceSnapshotIndex, placementName, placementKey.Namespace)
+	
+	// Interface-based status access and update
+	updateRunStatus := updateRun.GetStagedUpdateRunStatus()
+	for _, stageStatus := range updateRunStatus.StagesStatus {
+		// Modify status copy
+	}
+	updateRun.SetStagedUpdateRunStatus(*updateRunStatus)
+}
+```
+
+**Key Improvements**:
+1. **Generic Interface Parameters**: Uses `types.NamespacedName` for placement key and `StagedUpdateRunObj` interface
+2. **Resource Snapshot Resolver**: Uses `controller.ListAllResourceSnapshotWithAnIndex()` utility function
+3. **Interface-Based Access**: Uses `GetStagedUpdateRunSpec()`, `GetStagedUpdateRunStatus()`, `SetStagedUpdateRunStatus()`
+4. **Automatic Type Determination**: Namespace presence determines ClusterResourceSnapshot vs ResourceSnapshot
+5. **Proper Status Management**: Gets status copy, modifies it, then sets it back
+6. **Generic Logging**: Updated terminology from cluster-specific to generic
+
+**Impact**: This function is now fully generic and works with both cluster-scoped and namespace-scoped resources, completing another major piece of the interface-based refactoring.
+
+## Current Status
+- ✅ `validatePlacement`: Fully generic, uses utility functions and interfaces
+- ✅ `determinePolicySnapshot`: Fully generic, uses utility functions and interfaces, unnecessary switch removed
+- ✅ `collectScheduledClusters`: Fully generic, uses utility functions and interfaces
+- ✅ `computeRunStageStatus`: Fully generic, uses interface-based access patterns
+- ✅ `generateStagesByStrategy`: Fully generic, uses interface-based access patterns and new strategy resolver utility
+- ✅ `removeWaitTimeFromUpdateRunStatus`: Fully generic utility function using interface-based approach
+- ✅ `recordOverrideSnapshots`: Fully generic, uses interface-based access and resource snapshot resolver utilities
 - ⚠️ `initialize`: Still takes concrete ClusterStagedUpdateRun type, but now calls interface-based functions
