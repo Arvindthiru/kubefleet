@@ -362,10 +362,108 @@ func (r *Reconciler) computeRunStageStatus(
 
 **Integration**: The `generateStagesByStrategy` function now converts concrete binding arrays to interfaces before calling `computeRunStageStatus`, maintaining compatibility while enabling interface-based processing.
 
+### Phase 8: generateStagesByStrategy Refactor ✅
+
+**Target**: `generateStagesByStrategy` function - computes stages based on StagedUpdateStrategy
+
+**Implementation**: Applied interface-based pattern with new strategy resolver utility:
+
+**Before**:
+```go
+func (r *Reconciler) generateStagesByStrategy(
+	ctx context.Context,
+	scheduledBindings []*placementv1beta1.ClusterResourceBinding,
+	toBeDeletedBindings []*placementv1beta1.ClusterResourceBinding,
+	updateRun *placementv1beta1.ClusterStagedUpdateRun,
+) error {
+	// Direct Client.Get for ClusterStagedUpdateStrategy
+	var updateStrategy placementv1beta1.ClusterStagedUpdateStrategy
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: updateRun.Spec.StagedUpdateStrategyName}, &updateStrategy); err != nil {
+		// Direct field access
+		updateRun.Status.StagedUpdateStrategySnapshot = &updateStrategy.Spec
+		binding.Spec.TargetCluster
+	}
+}
+```
+
+**After**:
+```go
+func (r *Reconciler) generateStagesByStrategy(
+	ctx context.Context,
+	scheduledBindings []placementv1beta1.BindingObj,
+	toBeDeletedBindings []placementv1beta1.BindingObj,
+	updateRun placementv1beta1.StagedUpdateRunObj,
+) error {
+	// Generic utility function handles type determination
+	strategyKey := types.NamespacedName{
+		Name:      updateRunSpec.StagedUpdateStrategyName,
+		Namespace: updateRun.GetNamespace(),
+	}
+	updateStrategy, err := controller.FetchStagedUpdateStrategyFromNamespacedName(ctx, r.Client, strategyKey)
+	// Interface-based access
+	updateRunStatus.StagedUpdateStrategySnapshot = updateStrategy.GetStagedUpdateStrategySpec()
+	bindingSpec.TargetCluster
+}
+```
+
+**Key Improvements**:
+1. **Generic Interface Parameters**: Uses `[]BindingObj` and `StagedUpdateStrategyObj` instead of concrete types
+2. **Strategy Resolver Utility**: Created `strategy_resolver.go` with `FetchStagedUpdateStrategyFromNamespacedName()`
+3. **Interface-Based Access**: Uses `GetStagedUpdateRunSpec()`, `GetStagedUpdateRunStatus()`, `GetBindingSpec()` 
+4. **Interface-Based Status Updates**: Uses `SetStagedUpdateRunStatus()` instead of direct field assignment
+5. **Automatic Type Determination**: Namespace presence determines ClusterStagedUpdateStrategy vs StagedUpdateStrategy
+6. **Generic Logging**: Updated terminology from cluster-specific to generic
+
+**New Utility**: Created `/pkg/utils/controller/strategy_resolver.go` following the same pattern as `binding_resolver.go`
+
+### Phase 9: removeWaitTimeFromUpdateRunStatus Refactor ✅
+
+**Target**: `removeWaitTimeFromUpdateRunStatus` utility function - removes waitTime from approval tasks
+
+**Implementation**: Updated from concrete type to interface-based approach:
+
+**Before**:
+```go
+func removeWaitTimeFromUpdateRunStatus(updateRun *placementv1beta1.ClusterStagedUpdateRun) {
+	// Direct field access
+	if updateRun.Status.StagedUpdateStrategySnapshot != nil {
+		for i := range updateRun.Status.StagedUpdateStrategySnapshot.Stages {
+			// Direct status modification
+			updateRun.Status.StagedUpdateStrategySnapshot.Stages[i].AfterStageTasks[j].WaitTime = nil
+		}
+	}
+}
+```
+
+**After**:
+```go
+func removeWaitTimeFromUpdateRunStatus(updateRun placementv1beta1.StagedUpdateRunObj) {
+	// Interface-based access
+	updateRunStatus := updateRun.GetStagedUpdateRunStatus()
+	if updateRunStatus.StagedUpdateStrategySnapshot != nil {
+		for i := range updateRunStatus.StagedUpdateStrategySnapshot.Stages {
+			// Modify status copy
+			updateRunStatus.StagedUpdateStrategySnapshot.Stages[i].AfterStageTasks[j].WaitTime = nil
+		}
+		// Update back using interface method
+		updateRun.SetStagedUpdateRunStatus(*updateRunStatus)
+	}
+}
+```
+
+**Key Improvements**:
+1. **Generic Interface Parameter**: Uses `StagedUpdateRunObj` instead of `*ClusterStagedUpdateRun`
+2. **Interface-Based Status Access**: Uses `GetStagedUpdateRunStatus()` and `SetStagedUpdateRunStatus()`
+3. **Proper Status Management**: Gets status copy, modifies it, then sets it back
+4. **Eliminated Type Assertion**: Removed the type assertion workaround in `generateStagesByStrategy`
+
+**Impact**: This utility function is now generic and works with both `ClusterStagedUpdateRun` and `StagedUpdateRun` objects.
+
 ## Current Status
 - ✅ `validatePlacement`: Fully generic, uses utility functions and interfaces
 - ✅ `determinePolicySnapshot`: Fully generic, uses utility functions and interfaces, unnecessary switch removed
 - ✅ `collectScheduledClusters`: Fully generic, uses utility functions and interfaces
 - ✅ `computeRunStageStatus`: Fully generic, uses interface-based access patterns
+- ✅ `generateStagesByStrategy`: Fully generic, uses interface-based access patterns and new strategy resolver utility
+- ✅ `removeWaitTimeFromUpdateRunStatus`: Fully generic utility function using interface-based approach
 - ⚠️ `initialize`: Still takes concrete ClusterStagedUpdateRun type, but now calls interface-based functions
-- ⚠️ `generateStagesByStrategy`: Still takes concrete types but converts to interfaces for `computeRunStageStatus`

@@ -94,7 +94,8 @@ func (r *Reconciler) initialize(
 	}
 
 	// Compute the stages based on the StagedUpdateStrategy.
-	if err := r.generateStagesByStrategy(ctx, scheduledBindings, toBeDeletedBindings, updateRun); err != nil {
+	// Use interface objects directly - scheduledBindingObjs and toBeDeletedBindingObjs already exist
+	if err := r.generateStagesByStrategy(ctx, scheduledBindingObjs, toBeDeletedBindingObjs, updateRun); err != nil {
 		return nil, nil, err
 	}
 	// Record the override snapshots associated with each cluster.
@@ -295,21 +296,34 @@ func (r *Reconciler) collectScheduledClusters(
 	return selectedBindings, toBeDeletedBindings, nil
 }
 
-// generateStagesByStrategy computes the stages based on the ClusterStagedUpdateStrategy referenced by the ClusterStagedUpdateRun.
+// generateStagesByStrategy computes the stages based on the StagedUpdateStrategy referenced by the StagedUpdateRun.
 func (r *Reconciler) generateStagesByStrategy(
 	ctx context.Context,
-	scheduledBindings []*placementv1beta1.ClusterResourceBinding,
-	toBeDeletedBindings []*placementv1beta1.ClusterResourceBinding,
-	updateRun *placementv1beta1.ClusterStagedUpdateRun,
+	scheduledBindings []placementv1beta1.BindingObj,
+	toBeDeletedBindings []placementv1beta1.BindingObj,
+	updateRun placementv1beta1.StagedUpdateRunObj,
 ) error {
 	updateRunRef := klog.KObj(updateRun)
-	// Fetch the StagedUpdateStrategy referenced by StagedUpdateStrategyName.
-	var updateStrategy placementv1beta1.ClusterStagedUpdateStrategy
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: updateRun.Spec.StagedUpdateStrategyName}, &updateStrategy); err != nil {
-		klog.ErrorS(err, "Failed to get StagedUpdateStrategy", "stagedUpdateStrategy", updateRun.Spec.StagedUpdateStrategyName, "clusterStagedUpdateRun", updateRunRef)
+
+	// Get updateRun spec using interface methods
+	updateRunSpec := updateRun.GetStagedUpdateRunSpec()
+
+	// Create NamespacedName for the StagedUpdateStrategy
+	// For ClusterStagedUpdateRun, namespace will be empty (cluster-scoped)
+	// For StagedUpdateRun, namespace will be the actual namespace (namespace-scoped)
+	strategyKey := types.NamespacedName{
+		Name:      updateRunSpec.StagedUpdateStrategyName,
+		Namespace: updateRun.GetNamespace(),
+	}
+
+	// Fetch the StagedUpdateStrategy using utility function
+	// This automatically determines whether to fetch ClusterStagedUpdateStrategy or StagedUpdateStrategy
+	updateStrategy, err := controller.FetchStagedUpdateStrategyFromNamespacedName(ctx, r.Client, strategyKey)
+	if err != nil {
+		klog.ErrorS(err, "Failed to get StagedUpdateStrategy", "stagedUpdateStrategy", updateRunSpec.StagedUpdateStrategyName, "stagedUpdateRun", updateRunRef)
 		if apierrors.IsNotFound(err) {
 			// we won't continue or retry the initialization if the StagedUpdateStrategy is not found.
-			strategyNotFoundErr := controller.NewUserError(errors.New("referenced clusterStagedUpdateStrategy not found: " + updateRun.Spec.StagedUpdateStrategyName))
+			strategyNotFoundErr := controller.NewUserError(errors.New("referenced stagedUpdateStrategy not found: " + updateRunSpec.StagedUpdateStrategyName))
 			return fmt.Errorf("%w: %s", errInitializedFailed, strategyNotFoundErr.Error())
 		}
 		// other err can be retried.
@@ -317,29 +331,38 @@ func (r *Reconciler) generateStagesByStrategy(
 	}
 
 	// This won't change even if the stagedUpdateStrategy changes or is deleted after the updateRun is initialized.
-	updateRun.Status.StagedUpdateStrategySnapshot = &updateStrategy.Spec
+	// Use interface methods to access and update status
+	updateRunStatus := updateRun.GetStagedUpdateRunStatus()
+	updateStrategySpec := updateStrategy.GetStagedUpdateStrategySpec()
+	updateRunStatus.StagedUpdateStrategySnapshot = updateStrategySpec
+	updateRun.SetStagedUpdateRunStatus(*updateRunStatus)
+
 	// Remove waitTime from the updateRun status for AfterStageTask for type Approval.
 	removeWaitTimeFromUpdateRunStatus(updateRun)
 
 	// Compute the update stages.
-	// Convert concrete binding arrays to interface arrays
-	scheduledBindingObjs := controller.ConvertCRBArrayToBindingObjs(scheduledBindings)
-	if err := r.computeRunStageStatus(ctx, scheduledBindingObjs, updateRun); err != nil {
+	// scheduledBindings already are interface objects, no conversion needed
+	if err := r.computeRunStageStatus(ctx, scheduledBindings, updateRun); err != nil {
 		return err
 	}
 	toBeDeletedClusters := make([]placementv1beta1.ClusterUpdatingStatus, len(toBeDeletedBindings))
 	for i, binding := range toBeDeletedBindings {
-		klog.V(2).InfoS("Adding a cluster to the delete stage", "cluster", binding.Spec.TargetCluster, "clusterStagedUpdateStrategy", updateStrategy.Name, "clusterStagedUpdateRun", updateRunRef)
-		toBeDeletedClusters[i].ClusterName = binding.Spec.TargetCluster
+		bindingSpec := binding.GetBindingSpec()
+		klog.V(2).InfoS("Adding a cluster to the delete stage", "cluster", bindingSpec.TargetCluster, "stagedUpdateStrategy", updateStrategy.GetName(), "stagedUpdateRun", updateRunRef)
+		toBeDeletedClusters[i].ClusterName = bindingSpec.TargetCluster
 	}
 	// Sort the clusters in the deletion stage by their names.
 	sort.Slice(toBeDeletedClusters, func(i, j int) bool {
 		return toBeDeletedClusters[i].ClusterName < toBeDeletedClusters[j].ClusterName
 	})
-	updateRun.Status.DeletionStageStatus = &placementv1beta1.StageUpdatingStatus{
+
+	// Update deletion stage status using interface methods
+	updateRunStatus = updateRun.GetStagedUpdateRunStatus()
+	updateRunStatus.DeletionStageStatus = &placementv1beta1.StageUpdatingStatus{
 		StageName: placementv1beta1.UpdateRunDeleteStageName,
 		Clusters:  toBeDeletedClusters,
 	}
+	updateRun.SetStagedUpdateRunStatus(*updateRunStatus)
 	return nil
 }
 
