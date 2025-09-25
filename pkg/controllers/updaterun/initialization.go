@@ -1,7 +1,18 @@
 /*
 Copyright 2025 The KubeFleet Authors.
 
-Licensed under the Apache License, Version 2.0 (the "License");
+Licensed u	// Record the latest policy snapshot associated with the placement.
+	latestPolicySnapshot, _, err := r.determinePolicySnapshot(ctx, placementNamespacedName, updateRun)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Collect the scheduled clusters by the corresponding placement with the latest policy snapshot.
+	// Note: collectScheduledClusters still expects concrete type, will need refactoring next
+	clusterPolicySnapshot, ok := latestPolicySnapshot.(*placementv1beta1.ClusterSchedulingPolicySnapshot)
+	if !ok {
+		return nil, nil, fmt.Errorf("expected ClusterSchedulingPolicySnapshot but got %T", latestPolicySnapshot)
+	}
+	scheduledBindings, toBeDeletedBindings, err := r.collectScheduledClusters(ctx, placementNamespacedName.Name, clusterPolicySnapshot, updateRun)e Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
@@ -46,17 +57,22 @@ func (r *Reconciler) initialize(
 	updateRun *placementv1beta1.ClusterStagedUpdateRun,
 ) ([]*placementv1beta1.ClusterResourceBinding, []*placementv1beta1.ClusterResourceBinding, error) {
 	// Validate the Placement object referenced by the StagedUpdateRun.
-	placementName, err := r.validatePlacement(ctx, updateRun)
+	placementNamespacedName, err := r.validatePlacement(ctx, updateRun)
 	if err != nil {
 		return nil, nil, err
 	}
-	// Record the latest policy snapshot associated with the ClusterStagedUpdateRun.
-	latestPolicySnapshot, _, err := r.determinePolicySnapshot(ctx, placementName, updateRun)
+	// Record the latest policy snapshot associated with the placement.
+	latestPolicySnapshot, _, err := r.determinePolicySnapshot(ctx, placementNamespacedName, updateRun)
 	if err != nil {
 		return nil, nil, err
 	}
-	// Collect the scheduled clusters by the corresponding ClusterResourcePlacement with the latest policy snapshot.
-	scheduledBindings, toBeDeletedBindings, err := r.collectScheduledClusters(ctx, placementName, latestPolicySnapshot, updateRun)
+	// Collect the scheduled clusters by the corresponding placement with the latest policy snapshot.
+	// Note: collectScheduledClusters still expects concrete type, will need refactoring next
+	clusterPolicySnapshot, ok := latestPolicySnapshot.(*placementv1beta1.ClusterSchedulingPolicySnapshot)
+	if !ok {
+		return nil, nil, fmt.Errorf("expected ClusterSchedulingPolicySnapshot but got %T", latestPolicySnapshot)
+	}
+	scheduledBindings, toBeDeletedBindings, err := r.collectScheduledClusters(ctx, placementNamespacedName.Name, clusterPolicySnapshot, updateRun)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -65,7 +81,7 @@ func (r *Reconciler) initialize(
 		return nil, nil, err
 	}
 	// Record the override snapshots associated with each cluster.
-	if err := r.recordOverrideSnapshots(ctx, placementName, updateRun); err != nil {
+	if err := r.recordOverrideSnapshots(ctx, placementNamespacedName.Name, updateRun); err != nil {
 		return nil, nil, err
 	}
 
@@ -73,7 +89,7 @@ func (r *Reconciler) initialize(
 }
 
 // validatePlacement validates the Placement object (CRP or RP) referenced by the StagedUpdateRun.
-func (r *Reconciler) validatePlacement(ctx context.Context, updateRun placementv1beta1.StagedUpdateRunObj) (string, error) {
+func (r *Reconciler) validatePlacement(ctx context.Context, updateRun placementv1beta1.StagedUpdateRunObj) (types.NamespacedName, error) {
 	updateRunRef := klog.KObj(updateRun)
 
 	// Get placement name from the updateRun spec using interface methods
@@ -94,10 +110,10 @@ func (r *Reconciler) validatePlacement(ctx context.Context, updateRun placementv
 		if apierrors.IsNotFound(err) {
 			placementNotFoundErr := controller.NewUserError(fmt.Errorf("parent placement not found"))
 			klog.ErrorS(err, "Failed to get placement", "placement", placementName, "namespace", updateRun.GetNamespace(), "stagedUpdateRun", updateRunRef)
-			return "", fmt.Errorf("%w: %s", errInitializedFailed, placementNotFoundErr.Error())
+			return types.NamespacedName{}, fmt.Errorf("%w: %s", errInitializedFailed, placementNotFoundErr.Error())
 		}
 		klog.ErrorS(err, "Failed to get placement", "placement", placementName, "namespace", updateRun.GetNamespace(), "stagedUpdateRun", updateRunRef)
-		return "", controller.NewAPIServerError(true, err)
+		return types.NamespacedName{}, controller.NewAPIServerError(true, err)
 	}
 
 	// Check if the Placement has an external rollout strategy using interface methods
@@ -105,7 +121,7 @@ func (r *Reconciler) validatePlacement(ctx context.Context, updateRun placementv
 	if placementSpec.Strategy.Type != placementv1beta1.ExternalRolloutStrategyType {
 		klog.V(2).InfoS("The placement does not have an external rollout strategy", "placement", placementName, "namespace", updateRun.GetNamespace(), "stagedUpdateRun", updateRunRef)
 		wrongRolloutTypeErr := controller.NewUserError(errors.New("parent placement does not have an external rollout strategy, current strategy: " + string(placementSpec.Strategy.Type)))
-		return "", fmt.Errorf("%w: %s", errInitializedFailed, wrongRolloutTypeErr.Error())
+		return types.NamespacedName{}, fmt.Errorf("%w: %s", errInitializedFailed, wrongRolloutTypeErr.Error())
 	}
 
 	// Update the apply strategy in the updateRun status using interface methods
@@ -113,79 +129,86 @@ func (r *Reconciler) validatePlacement(ctx context.Context, updateRun placementv
 	updateRunStatus.ApplyStrategy = placementSpec.Strategy.ApplyStrategy
 	updateRun.SetStagedUpdateRunStatus(*updateRunStatus)
 
-	return placementName, nil
+	return namespacedName, nil
 }
 
-// determinePolicySnapshot retrieves the latest policy snapshot associated with the ClusterResourcePlacement,
-// and validates it and records it in the ClusterStagedUpdateRun status.
+// determinePolicySnapshot retrieves the latest policy snapshot associated with the Placement,
+// and validates it and records it in the StagedUpdateRun status.
 func (r *Reconciler) determinePolicySnapshot(
 	ctx context.Context,
-	placementName string,
-	updateRun *placementv1beta1.ClusterStagedUpdateRun,
-) (*placementv1beta1.ClusterSchedulingPolicySnapshot, int, error) {
+	placementNamespacedName types.NamespacedName,
+	updateRun placementv1beta1.StagedUpdateRunObj,
+) (placementv1beta1.PolicySnapshotObj, int, error) {
 	updateRunRef := klog.KObj(updateRun)
-	// Get the latest policy snapshot.
-	var policySnapshotList placementv1beta1.ClusterSchedulingPolicySnapshotList
-	latestPolicyMatcher := client.MatchingLabels{
-		placementv1beta1.PlacementTrackingLabel: placementName,
-		placementv1beta1.IsLatestSnapshotLabel:  "true",
-	}
-	if err := r.Client.List(ctx, &policySnapshotList, latestPolicyMatcher); err != nil {
-		klog.ErrorS(err, "Failed to list the latest policy snapshots", "clusterResourcePlacement", placementName, "clusterStagedUpdateRun", updateRunRef)
+
+	// Get the latest policy snapshot using the utility function
+	// This automatically determines whether to fetch ClusterSchedulingPolicySnapshot or SchedulingPolicySnapshot
+	policySnapshotList, err := controller.FetchLatestPolicySnapshot(ctx, r.Client, placementNamespacedName)
+	if err != nil {
+		klog.ErrorS(err, "Failed to list the latest policy snapshots", "placement", placementNamespacedName, "stagedUpdateRun", updateRunRef)
 		// err can be retried.
 		return nil, -1, controller.NewAPIServerError(true, err)
 	}
-	if len(policySnapshotList.Items) != 1 {
-		if len(policySnapshotList.Items) > 1 {
-			err := controller.NewUnexpectedBehaviorError(fmt.Errorf("more than one (%d in actual) latest policy snapshots associated with the clusterResourcePlacement: %s", len(policySnapshotList.Items), placementName))
-			klog.ErrorS(err, "Failed to find the latest policy snapshot", "clusterResourcePlacement", placementName, "clusterStagedUpdateRun", updateRunRef)
+
+	policySnapshotObjs := policySnapshotList.GetPolicySnapshotObjs()
+	if len(policySnapshotObjs) != 1 {
+		if len(policySnapshotObjs) > 1 {
+			err := controller.NewUnexpectedBehaviorError(fmt.Errorf("more than one (%d in actual) latest policy snapshots associated with the placement: %v", len(policySnapshotObjs), placementNamespacedName))
+			klog.ErrorS(err, "Failed to find the latest policy snapshot", "placement", placementNamespacedName, "stagedUpdateRun", updateRunRef)
 			// no more retries for this error.
 			return nil, -1, fmt.Errorf("%w: %s", errInitializedFailed, err.Error())
 		}
 		// no latest policy snapshot found.
-		err := fmt.Errorf("no latest policy snapshot associated with the clusterResourcePlacement: %s", placementName)
-		klog.ErrorS(err, "Failed to find the latest policy snapshot", "clusterResourcePlacement", placementName, "clusterStagedUpdateRun", updateRunRef)
+		err := fmt.Errorf("no latest policy snapshot associated with the placement: %v", placementNamespacedName)
+		klog.ErrorS(err, "Failed to find the latest policy snapshot", "placement", placementNamespacedName, "stagedUpdateRun", updateRunRef)
 		// again, no more retries here.
 		return nil, -1, fmt.Errorf("%w: %s", errInitializedFailed, err.Error())
 	}
 
-	latestPolicySnapshot := policySnapshotList.Items[0]
-	policyIndex, foundIndex := latestPolicySnapshot.Labels[placementv1beta1.PolicyIndexLabel]
+	latestPolicySnapshot := policySnapshotObjs[0]
+	policyIndex, foundIndex := latestPolicySnapshot.GetLabels()[placementv1beta1.PolicyIndexLabel]
 	if !foundIndex || len(policyIndex) == 0 {
-		noIndexErr := controller.NewUnexpectedBehaviorError(fmt.Errorf("policy snapshot `%s` does not have a policy index label", latestPolicySnapshot.Name))
-		klog.ErrorS(noIndexErr, "Failed to get the policy index from the latestPolicySnapshot", "clusterResourcePlacement", placementName, "latestPolicySnapshot", latestPolicySnapshot.Name, "clusterStagedUpdateRun", updateRunRef)
+		noIndexErr := controller.NewUnexpectedBehaviorError(fmt.Errorf("policy snapshot `%s` does not have a policy index label", latestPolicySnapshot.GetName()))
+		klog.ErrorS(noIndexErr, "Failed to get the policy index from the latestPolicySnapshot", "placement", placementNamespacedName, "latestPolicySnapshot", latestPolicySnapshot.GetName(), "stagedUpdateRun", updateRunRef)
 		// no more retries here.
 		return nil, -1, fmt.Errorf("%w: %s", errInitializedFailed, noIndexErr.Error())
 	}
-	updateRun.Status.PolicySnapshotIndexUsed = policyIndex
+
+	// Update the policy snapshot index in updateRun status using interface methods
+	updateRunStatus := updateRun.GetStagedUpdateRunStatus()
+	updateRunStatus.PolicySnapshotIndexUsed = policyIndex
 
 	// For pickAll policy, the observed cluster count is not included in the policy snapshot.
 	// We set it to -1. It will be validated in the binding stages.
 	// If policy is nil, it's default to pickAll.
 	clusterCount := -1
-	if latestPolicySnapshot.Spec.Policy != nil {
-		if latestPolicySnapshot.Spec.Policy.PlacementType == placementv1beta1.PickNPlacementType {
-			count, err := annotations.ExtractNumOfClustersFromPolicySnapshot(&latestPolicySnapshot)
+	policySnapshotSpec := latestPolicySnapshot.GetPolicySnapshotSpec()
+	if policySnapshotSpec.Policy != nil {
+		if policySnapshotSpec.Policy.PlacementType == placementv1beta1.PickNPlacementType {
+			// Extract cluster count using interface - no switch needed
+			count, err := annotations.ExtractNumOfClustersFromPolicySnapshot(latestPolicySnapshot)
 			if err != nil {
-				annErr := controller.NewUnexpectedBehaviorError(fmt.Errorf("%w: the policy snapshot `%s` doesn't have valid cluster count annotation", err, latestPolicySnapshot.Name))
-				klog.ErrorS(annErr, "Failed to get the cluster count from the latestPolicySnapshot", "clusterResourcePlacement", placementName, "latestPolicySnapshot", latestPolicySnapshot.Name, "clusterStagedUpdateRun", updateRunRef)
+				annErr := controller.NewUnexpectedBehaviorError(fmt.Errorf("%w: the policy snapshot `%s` doesn't have valid cluster count annotation", err, latestPolicySnapshot.GetName()))
+				klog.ErrorS(annErr, "Failed to get the cluster count from the latestPolicySnapshot", "placement", placementNamespacedName, "latestPolicySnapshot", latestPolicySnapshot.GetName(), "stagedUpdateRun", updateRunRef)
 				// no more retries here.
 				return nil, -1, fmt.Errorf("%w, %s", errInitializedFailed, annErr.Error())
 			}
 			clusterCount = count
-		} else if latestPolicySnapshot.Spec.Policy.PlacementType == placementv1beta1.PickFixedPlacementType {
-			clusterCount = len(latestPolicySnapshot.Spec.Policy.ClusterNames)
+		} else if policySnapshotSpec.Policy.PlacementType == placementv1beta1.PickFixedPlacementType {
+			clusterCount = len(policySnapshotSpec.Policy.ClusterNames)
 		}
 	}
-	updateRun.Status.PolicyObservedClusterCount = clusterCount
-	klog.V(2).InfoS("Found the latest policy snapshot", "latestPolicySnapshot", latestPolicySnapshot.Name, "observedClusterCount", updateRun.Status.PolicyObservedClusterCount, "clusterStagedUpdateRun", updateRunRef)
+	updateRunStatus.PolicyObservedClusterCount = clusterCount
+	updateRun.SetStagedUpdateRunStatus(*updateRunStatus)
 
-	if !condition.IsConditionStatusTrue(latestPolicySnapshot.GetCondition(string(placementv1beta1.PolicySnapshotScheduled)), latestPolicySnapshot.Generation) {
-		scheduleErr := fmt.Errorf("policy snapshot `%s` not fully scheduled yet", latestPolicySnapshot.Name)
-		klog.ErrorS(scheduleErr, "The policy snapshot is not scheduled successfully", "clusterResourcePlacement", placementName, "latestPolicySnapshot", latestPolicySnapshot.Name, "clusterStagedUpdateRun", updateRunRef)
+	klog.V(2).InfoS("Found the latest policy snapshot", "latestPolicySnapshot", latestPolicySnapshot.GetName(), "observedClusterCount", updateRunStatus.PolicyObservedClusterCount, "stagedUpdateRun", updateRunRef)
+
+	if !condition.IsConditionStatusTrue(latestPolicySnapshot.GetCondition(string(placementv1beta1.PolicySnapshotScheduled)), latestPolicySnapshot.GetGeneration()) {
+		scheduleErr := fmt.Errorf("policy snapshot `%s` not fully scheduled yet", latestPolicySnapshot.GetName())
+		klog.ErrorS(scheduleErr, "The policy snapshot is not scheduled successfully", "placement", placementNamespacedName, "latestPolicySnapshot", latestPolicySnapshot.GetName(), "stagedUpdateRun", updateRunRef)
 		return nil, -1, fmt.Errorf("%w: %s", errInitializedFailed, scheduleErr.Error())
 	}
-	return &latestPolicySnapshot, clusterCount, nil
+	return latestPolicySnapshot, clusterCount, nil
 }
 
 // collectScheduledClusters retrieves the schedules clusters from the latest policy snapshot
