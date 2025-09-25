@@ -67,15 +67,32 @@ func (r *Reconciler) initialize(
 		return nil, nil, err
 	}
 	// Collect the scheduled clusters by the corresponding placement with the latest policy snapshot.
-	// Note: collectScheduledClusters still expects concrete type, will need refactoring next
-	clusterPolicySnapshot, ok := latestPolicySnapshot.(*placementv1beta1.ClusterSchedulingPolicySnapshot)
-	if !ok {
-		return nil, nil, fmt.Errorf("expected ClusterSchedulingPolicySnapshot but got %T", latestPolicySnapshot)
-	}
-	scheduledBindings, toBeDeletedBindings, err := r.collectScheduledClusters(ctx, placementNamespacedName.Name, clusterPolicySnapshot, updateRun)
+	scheduledBindingObjs, toBeDeletedBindingObjs, err := r.collectScheduledClusters(ctx, placementNamespacedName, latestPolicySnapshot, updateRun)
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// Convert interfaces back to concrete types for compatibility with other functions that haven't been refactored yet
+	scheduledBindings := make([]*placementv1beta1.ClusterResourceBinding, len(scheduledBindingObjs))
+	toBeDeletedBindings := make([]*placementv1beta1.ClusterResourceBinding, len(toBeDeletedBindingObjs))
+
+	for i, bindingObj := range scheduledBindingObjs {
+		if crb, ok := bindingObj.(*placementv1beta1.ClusterResourceBinding); ok {
+			scheduledBindings[i] = crb
+		} else {
+			// This should only happen for StagedUpdateRun with ResourceBinding, but initialize currently only handles ClusterStagedUpdateRun
+			return nil, nil, fmt.Errorf("expected ClusterResourceBinding but got %T - initialize function needs further refactoring for namespace-scoped resources", bindingObj)
+		}
+	}
+
+	for i, bindingObj := range toBeDeletedBindingObjs {
+		if crb, ok := bindingObj.(*placementv1beta1.ClusterResourceBinding); ok {
+			toBeDeletedBindings[i] = crb
+		} else {
+			return nil, nil, fmt.Errorf("expected ClusterResourceBinding but got %T - initialize function needs further refactoring for namespace-scoped resources", bindingObj)
+		}
+	}
+
 	// Compute the stages based on the StagedUpdateStrategy.
 	if err := r.generateStagesByStrategy(ctx, scheduledBindings, toBeDeletedBindings, updateRun); err != nil {
 		return nil, nil, err
@@ -215,61 +232,63 @@ func (r *Reconciler) determinePolicySnapshot(
 // and lists all the bindings according to its SchedulePolicyTrackingLabel.
 func (r *Reconciler) collectScheduledClusters(
 	ctx context.Context,
-	placementName string,
-	latestPolicySnapshot *placementv1beta1.ClusterSchedulingPolicySnapshot,
-	updateRun *placementv1beta1.ClusterStagedUpdateRun,
-) ([]*placementv1beta1.ClusterResourceBinding, []*placementv1beta1.ClusterResourceBinding, error) {
+	placementKey types.NamespacedName,
+	latestPolicySnapshot placementv1beta1.PolicySnapshotObj,
+	updateRun placementv1beta1.StagedUpdateRunObj,
+) ([]placementv1beta1.BindingObj, []placementv1beta1.BindingObj, error) {
 	updateRunRef := klog.KObj(updateRun)
-	// List all the bindings according to the ClusterResourcePlacement.
-	var bindingList placementv1beta1.ClusterResourceBindingList
-	resourceBindingMatcher := client.MatchingLabels{
-		placementv1beta1.PlacementTrackingLabel: placementName,
-	}
-	if err := r.Client.List(ctx, &bindingList, resourceBindingMatcher); err != nil {
-		klog.ErrorS(err, "Failed to list clusterResourceBindings", "clusterResourcePlacement", placementName, "latestPolicySnapshot", latestPolicySnapshot.Name, "clusterStagedUpdateRun", updateRunRef)
+
+	// List all the bindings using utility function - automatically determines CRB vs RB based on namespace
+	bindingObjs, err := controller.ListBindingsFromKey(ctx, r.Client, placementKey)
+	if err != nil {
+		klog.ErrorS(err, "Failed to list bindings", "placement", placementKey, "latestPolicySnapshot", latestPolicySnapshot.GetName(), "stagedUpdateRun", updateRunRef)
 		// list err can be retried.
 		return nil, nil, controller.NewAPIServerError(true, err)
 	}
-	var toBeDeletedBindings, selectedBindings []*placementv1beta1.ClusterResourceBinding
-	for i, binding := range bindingList.Items {
-		if binding.Spec.SchedulingPolicySnapshotName == latestPolicySnapshot.Name {
-			if binding.Spec.State == placementv1beta1.BindingStateUnscheduled {
-				klog.V(2).InfoS("Found an unscheduled binding with the latest policy snapshot, delete it", "binding", binding.Name, "clusterResourcePlacement", placementName,
-					"latestPolicySnapshot", latestPolicySnapshot.Name, "clusterStagedUpdateRun", updateRunRef)
-				toBeDeletedBindings = append(toBeDeletedBindings, &bindingList.Items[i])
+	var toBeDeletedBindings, selectedBindings []placementv1beta1.BindingObj
+	for i, binding := range bindingObjs {
+		bindingSpec := binding.GetBindingSpec()
+		if bindingSpec.SchedulingPolicySnapshotName == latestPolicySnapshot.GetName() {
+			if bindingSpec.State == placementv1beta1.BindingStateUnscheduled {
+				klog.V(2).InfoS("Found an unscheduled binding with the latest policy snapshot, delete it", "binding", binding.GetName(), "placement", placementKey,
+					"latestPolicySnapshot", latestPolicySnapshot.GetName(), "stagedUpdateRun", updateRunRef)
+				toBeDeletedBindings = append(toBeDeletedBindings, bindingObjs[i])
 			} else {
-				klog.V(2).InfoS("Found a scheduled binding", "binding", binding.Name, "clusterResourcePlacement", placementName,
-					"latestPolicySnapshot", latestPolicySnapshot.Name, "clusterStagedUpdateRun", updateRunRef)
-				selectedBindings = append(selectedBindings, &bindingList.Items[i])
+				klog.V(2).InfoS("Found a scheduled binding", "binding", binding.GetName(), "placement", placementKey,
+					"latestPolicySnapshot", latestPolicySnapshot.GetName(), "stagedUpdateRun", updateRunRef)
+				selectedBindings = append(selectedBindings, bindingObjs[i])
 			}
 		} else {
-			if binding.Spec.State != placementv1beta1.BindingStateUnscheduled {
-				stateErr := fmt.Errorf("binding `%s` with old policy snapshot %s has state %s, we might observe a transient state, need retry", binding.Name, binding.Spec.SchedulingPolicySnapshotName, binding.Spec.State)
-				klog.V(2).InfoS("Found a not-unscheduled binding with old policy snapshot, retrying", "binding", binding.Name, "clusterResourcePlacement", placementName,
-					"latestPolicySnapshot", latestPolicySnapshot.Name, "clusterStagedUpdateRun", updateRunRef)
+			if bindingSpec.State != placementv1beta1.BindingStateUnscheduled {
+				stateErr := fmt.Errorf("binding `%s` with old policy snapshot %s has state %s, we might observe a transient state, need retry", binding.GetName(), bindingSpec.SchedulingPolicySnapshotName, bindingSpec.State)
+				klog.V(2).InfoS("Found a not-unscheduled binding with old policy snapshot, retrying", "binding", binding.GetName(), "placement", placementKey,
+					"latestPolicySnapshot", latestPolicySnapshot.GetName(), "stagedUpdateRun", updateRunRef)
 				// Transient state can be retried.
 				return nil, nil, stateErr
 			}
-			klog.V(2).InfoS("Found an unscheduled binding with old policy snapshot", "binding", binding.Name, "cluster", binding.Spec.TargetCluster,
-				"clusterResourcePlacement", placementName, "latestPolicySnapshot", latestPolicySnapshot.Name, "clusterStagedUpdateRun", updateRunRef)
-			toBeDeletedBindings = append(toBeDeletedBindings, &bindingList.Items[i])
+			klog.V(2).InfoS("Found an unscheduled binding with old policy snapshot", "binding", binding.GetName(), "cluster", bindingSpec.TargetCluster,
+				"placement", placementKey, "latestPolicySnapshot", latestPolicySnapshot.GetName(), "stagedUpdateRun", updateRunRef)
+			toBeDeletedBindings = append(toBeDeletedBindings, bindingObjs[i])
 		}
 	}
 
 	if len(selectedBindings) == 0 && len(toBeDeletedBindings) == 0 {
-		nobindingErr := fmt.Errorf("no scheduled or to-be-deleted clusterResourceBindings found for the latest policy snapshot %s", latestPolicySnapshot.Name)
-		klog.ErrorS(nobindingErr, "Failed to collect clusterResourceBindings", "clusterResourcePlacement", placementName, "latestPolicySnapshot", latestPolicySnapshot.Name, "clusterStagedUpdateRun", updateRunRef)
+		nobindingErr := fmt.Errorf("no scheduled or to-be-deleted bindings found for the latest policy snapshot %s", latestPolicySnapshot.GetName())
+		klog.ErrorS(nobindingErr, "Failed to collect bindings", "placement", placementKey, "latestPolicySnapshot", latestPolicySnapshot.GetName(), "stagedUpdateRun", updateRunRef)
 		// no more retries here.
 		return nil, nil, fmt.Errorf("%w: %s", errInitializedFailed, nobindingErr.Error())
 	}
 
-	if updateRun.Status.PolicyObservedClusterCount == -1 {
+	// Use interface methods for status access
+	updateRunStatus := updateRun.GetStagedUpdateRunStatus()
+	if updateRunStatus.PolicyObservedClusterCount == -1 {
 		// For pickAll policy, the observed cluster count is not included in the policy snapshot. We set it to the number of selected bindings.
 		// TODO (wantjian): refactor this part to update PolicyObservedClusterCount in one place.
-		updateRun.Status.PolicyObservedClusterCount = len(selectedBindings)
-	} else if updateRun.Status.PolicyObservedClusterCount != len(selectedBindings) {
-		countErr := controller.NewUnexpectedBehaviorError(fmt.Errorf("the number of selected bindings %d is not equal to the observed cluster count %d", len(selectedBindings), updateRun.Status.PolicyObservedClusterCount))
-		klog.ErrorS(countErr, "Failed to collect clusterResourceBindings", "clusterResourcePlacement", placementName, "latestPolicySnapshot", latestPolicySnapshot.Name, "clusterStagedUpdateRun", updateRunRef)
+		updateRunStatus.PolicyObservedClusterCount = len(selectedBindings)
+		updateRun.SetStagedUpdateRunStatus(*updateRunStatus)
+	} else if updateRunStatus.PolicyObservedClusterCount != len(selectedBindings) {
+		countErr := controller.NewUnexpectedBehaviorError(fmt.Errorf("the number of selected bindings %d is not equal to the observed cluster count %d", len(selectedBindings), updateRunStatus.PolicyObservedClusterCount))
+		klog.ErrorS(countErr, "Failed to collect bindings", "placement", placementKey, "latestPolicySnapshot", latestPolicySnapshot.GetName(), "stagedUpdateRun", updateRunRef)
 		// no more retries here.
 		return nil, nil, fmt.Errorf("%w: %s", errInitializedFailed, countErr.Error())
 	}
