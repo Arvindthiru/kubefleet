@@ -24,19 +24,19 @@ import (
 	"github.com/kubefleet-dev/kubefleet/apis"
 )
 
-// make sure the UpdateRunObj and UpdateRunObjList interfaces are implemented by the
+// make sure the StagedUpdateRunObj and StagedUpdateRunObjList interfaces are implemented by the
 // ClusterStagedUpdateRun and StagedUpdateRun types.
-var _ UpdateRunObj = &ClusterStagedUpdateRun{}
-var _ UpdateRunObj = &StagedUpdateRun{}
-var _ UpdateRunObjList = &ClusterStagedUpdateRunList{}
-var _ UpdateRunObjList = &StagedUpdateRunList{}
+var _ StagedUpdateRunObj = &ClusterStagedUpdateRun{}
+var _ StagedUpdateRunObj = &StagedUpdateRun{}
+var _ StagedUpdateRunObjList = &ClusterStagedUpdateRunList{}
+var _ StagedUpdateRunObjList = &StagedUpdateRunList{}
 
-// make sure the UpdateStrategyObj and UpdateStrategyObjList interfaces are implemented by the
+// make sure the StagedUpdateStrategyObj and StagedUpdateStrategyObjList interfaces are implemented by the
 // ClusterStagedUpdateStrategy and StagedUpdateStrategy types.
-var _ UpdateStrategyObj = &ClusterStagedUpdateStrategy{}
-var _ UpdateStrategyObj = &StagedUpdateStrategy{}
-var _ UpdateStrategyObjList = &ClusterStagedUpdateStrategyList{}
-var _ UpdateStrategyObjList = &StagedUpdateStrategyList{}
+var _ StagedUpdateStrategyObj = &ClusterStagedUpdateStrategy{}
+var _ StagedUpdateStrategyObj = &StagedUpdateStrategy{}
+var _ StagedUpdateStrategyObjList = &ClusterStagedUpdateStrategyList{}
+var _ StagedUpdateStrategyObjList = &StagedUpdateStrategyList{}
 
 // make sure the ApprovalRequestObj and ApprovalRequestObjList interfaces are implemented by the
 // ClusterApprovalRequest and ApprovalRequest types.
@@ -59,23 +59,23 @@ type UpdateRunStatusGetterSetter interface {
 	SetStagedUpdateRunStatus(StagedUpdateRunStatus)
 }
 
-// UpdateRunObj offers the functionality to work with staged update run objects.
+// StagedUpdateRunObj offers the functionality to work with staged update run objects.
 // +kubebuilder:object:generate=false
-type UpdateRunObj interface {
+type StagedUpdateRunObj interface {
 	apis.ConditionedObj
 	UpdateRunSpecGetterSetter
 	UpdateRunStatusGetterSetter
 }
 
-// UpdateRunListItemGetter offers the functionality to get a list of UpdateRunObj items.
+// UpdateRunListItemGetter offers the functionality to get a list of StagedUpdateRunObj items.
 // +kubebuilder:object:generate=false
 type UpdateRunListItemGetter interface {
-	GetUpdateRunObjs() []UpdateRunObj
+	GetUpdateRunObjs() []StagedUpdateRunObj
 }
 
-// UpdateRunObjList offers the functionality to work with staged update run object list.
+// StagedUpdateRunObjList offers the functionality to work with staged update run object list.
 // +kubebuilder:object:generate=false
-type UpdateRunObjList interface {
+type StagedUpdateRunObjList interface {
 	client.ObjectList
 	UpdateRunListItemGetter
 }
@@ -87,22 +87,22 @@ type UpdateStrategySpecGetterSetter interface {
 	SetStagedUpdateStrategySpec(StagedUpdateStrategySpec)
 }
 
-// UpdateStrategyObj offers the functionality to work with staged update strategy objects.
+// StagedUpdateStrategyObj offers the functionality to work with staged update strategy objects.
 // +kubebuilder:object:generate=false
-type UpdateStrategyObj interface {
+type StagedUpdateStrategyObj interface {
 	client.Object
 	UpdateStrategySpecGetterSetter
 }
 
-// UpdateStrategyListItemGetter offers the functionality to get a list of UpdateStrategyObj items.
+// UpdateStrategyListItemGetter offers the functionality to get a list of StagedUpdateStrategyObj items.
 // +kubebuilder:object:generate=false
 type UpdateStrategyListItemGetter interface {
-	GetUpdateStrategyObjs() []UpdateStrategyObj
+	GetUpdateStrategyObjs() []StagedUpdateStrategyObj
 }
 
-// UpdateStrategyObjList offers the functionality to work with staged update strategy object list.
+// StagedUpdateStrategyObjList offers the functionality to work with staged update strategy object list.
 // +kubebuilder:object:generate=false
-type UpdateStrategyObjList interface {
+type StagedUpdateStrategyObjList interface {
 	client.ObjectList
 	UpdateStrategyListItemGetter
 }
@@ -278,8 +278,8 @@ type ClusterStagedUpdateStrategyList struct {
 }
 
 // GetUpdateStrategyObjs returns the update strategy objects in the list.
-func (c *ClusterStagedUpdateStrategyList) GetUpdateStrategyObjs() []UpdateStrategyObj {
-	objs := make([]UpdateStrategyObj, len(c.Items))
+func (c *ClusterStagedUpdateStrategyList) GetUpdateStrategyObjs() []StagedUpdateStrategyObj {
+	objs := make([]StagedUpdateStrategyObj, len(c.Items))
 	for i := range c.Items {
 		objs[i] = &c.Items[i]
 	}
@@ -584,8 +584,8 @@ type ClusterStagedUpdateRunList struct {
 }
 
 // GetUpdateRunObjs returns the update run objects in the list.
-func (c *ClusterStagedUpdateRunList) GetUpdateRunObjs() []UpdateRunObj {
-	objs := make([]UpdateRunObj, len(c.Items))
+func (c *ClusterStagedUpdateRunList) GetUpdateRunObjs() []StagedUpdateRunObj {
+	objs := make([]StagedUpdateRunObj, len(c.Items))
 	for i := range c.Items {
 		objs[i] = &c.Items[i]
 	}
@@ -786,8 +786,8 @@ type StagedUpdateRunList struct {
 }
 
 // GetUpdateRunObjs returns the update run objects in the list.
-func (s *StagedUpdateRunList) GetUpdateRunObjs() []UpdateRunObj {
-	objs := make([]UpdateRunObj, len(s.Items))
+func (s *StagedUpdateRunList) GetUpdateRunObjs() []StagedUpdateRunObj {
+	objs := make([]StagedUpdateRunObj, len(s.Items))
 	for i := range s.Items {
 		objs[i] = &s.Items[i]
 	}
@@ -831,8 +831,8 @@ type StagedUpdateStrategyList struct {
 }
 
 // GetUpdateStrategyObjs returns the update strategy objects in the list.
-func (s *StagedUpdateStrategyList) GetUpdateStrategyObjs() []UpdateStrategyObj {
-	objs := make([]UpdateStrategyObj, len(s.Items))
+func (s *StagedUpdateStrategyList) GetUpdateStrategyObjs() []StagedUpdateStrategyObj {
+	objs := make([]StagedUpdateStrategyObj, len(s.Items))
 	for i := range s.Items {
 		objs[i] = &s.Items[i]
 	}
