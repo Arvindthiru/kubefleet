@@ -322,7 +322,9 @@ func (r *Reconciler) generateStagesByStrategy(
 	removeWaitTimeFromUpdateRunStatus(updateRun)
 
 	// Compute the update stages.
-	if err := r.computeRunStageStatus(ctx, scheduledBindings, updateRun); err != nil {
+	// Convert concrete binding arrays to interface arrays
+	scheduledBindingObjs := controller.ConvertCRBArrayToBindingObjs(scheduledBindings)
+	if err := r.computeRunStageStatus(ctx, scheduledBindingObjs, updateRun); err != nil {
 		return err
 	}
 	toBeDeletedClusters := make([]placementv1beta1.ClusterUpdatingStatus, len(toBeDeletedBindings))
@@ -341,25 +343,30 @@ func (r *Reconciler) generateStagesByStrategy(
 	return nil
 }
 
-// computeRunStageStatus computes the stages based on the ClusterStagedUpdateStrategy and records them in the ClusterStagedUpdateRun status.
+// computeRunStageStatus computes the stages based on the StagedUpdateStrategy and records them in the StagedUpdateRun status.
 func (r *Reconciler) computeRunStageStatus(
 	ctx context.Context,
-	scheduledBindings []*placementv1beta1.ClusterResourceBinding,
-	updateRun *placementv1beta1.ClusterStagedUpdateRun,
+	scheduledBindings []placementv1beta1.BindingObj,
+	updateRun placementv1beta1.StagedUpdateRunObj,
 ) error {
 	updateRunRef := klog.KObj(updateRun)
-	updateStrategyName := updateRun.Spec.StagedUpdateStrategyName
+
+	// Use interface methods to access updateRun data
+	updateRunSpec := updateRun.GetStagedUpdateRunSpec()
+	updateRunStatus := updateRun.GetStagedUpdateRunStatus()
+	updateStrategyName := updateRunSpec.StagedUpdateStrategyName
 
 	// Map to track clusters and ensure they appear in one and only one stage.
 	allSelectedClusters := make(map[string]struct{}, len(scheduledBindings))
 	allPlacedClusters := make(map[string]struct{})
 	for _, binding := range scheduledBindings {
-		allSelectedClusters[binding.Spec.TargetCluster] = struct{}{}
+		bindingSpec := binding.GetBindingSpec()
+		allSelectedClusters[bindingSpec.TargetCluster] = struct{}{}
 	}
-	stagesStatus := make([]placementv1beta1.StageUpdatingStatus, 0, len(updateRun.Status.StagedUpdateStrategySnapshot.Stages))
+	stagesStatus := make([]placementv1beta1.StageUpdatingStatus, 0, len(updateRunStatus.StagedUpdateStrategySnapshot.Stages))
 
-	// Apply the label selectors from the ClusterStagedUpdateStrategy to filter the clusters.
-	for _, stage := range updateRun.Status.StagedUpdateStrategySnapshot.Stages {
+	// Apply the label selectors from the StagedUpdateStrategy to filter the clusters.
+	for _, stage := range updateRunStatus.StagedUpdateStrategySnapshot.Stages {
 		if err := validateAfterStageTask(stage.AfterStageTasks); err != nil {
 			klog.ErrorS(err, "Failed to validate the after stage tasks", "clusterStagedUpdateStrategy", updateStrategyName, "stage name", stage.Name, "clusterStagedUpdateRun", updateRunRef)
 			// no more retries here.
@@ -439,12 +446,15 @@ func (r *Reconciler) computeRunStageStatus(
 		for i, task := range stage.AfterStageTasks {
 			curStageUpdatingStatus.AfterStageTaskStatus[i].Type = task.Type
 			if task.Type == placementv1beta1.AfterStageTaskTypeApproval {
-				curStageUpdatingStatus.AfterStageTaskStatus[i].ApprovalRequestName = fmt.Sprintf(placementv1beta1.ApprovalTaskNameFmt, updateRun.Name, stage.Name)
+				curStageUpdatingStatus.AfterStageTaskStatus[i].ApprovalRequestName = fmt.Sprintf(placementv1beta1.ApprovalTaskNameFmt, updateRun.GetName(), stage.Name)
 			}
 		}
 		stagesStatus = append(stagesStatus, curStageUpdatingStatus)
 	}
-	updateRun.Status.StagesStatus = stagesStatus
+
+	// Update the stages status using interface methods
+	updateRunStatus.StagesStatus = stagesStatus
+	updateRun.SetStagedUpdateRunStatus(*updateRunStatus)
 
 	// Check if the clusters are all placed.
 	if len(allPlacedClusters) != len(allSelectedClusters) {

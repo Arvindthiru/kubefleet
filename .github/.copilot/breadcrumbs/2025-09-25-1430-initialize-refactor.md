@@ -309,8 +309,63 @@ func (r *Reconciler) collectScheduledClusters(
 
 **Compatibility Note**: The `initialize` function includes temporary type conversion logic to maintain compatibility with other functions (`generateStagesByStrategy`, `recordOverrideSnapshots`) that haven't been refactored yet. This demonstrates the incremental nature of the interface-based refactoring.
 
+### Phase 7: computeRunStageStatus Refactor ✅
+
+**Target**: `computeRunStageStatus` function - computes cluster stages based on StagedUpdateStrategy
+
+**Implementation**: Applied interface-based pattern consistently:
+
+**Before**:
+```go
+func (r *Reconciler) computeRunStageStatus(
+    ctx context.Context,
+    scheduledBindings []*placementv1beta1.ClusterResourceBinding,
+    updateRun *placementv1beta1.ClusterStagedUpdateRun,
+) error {
+    // Direct field access
+    updateStrategyName := updateRun.Spec.StagedUpdateStrategyName
+    allSelectedClusters[binding.Spec.TargetCluster] = struct{}{}
+    for _, stage := range updateRun.Status.StagedUpdateStrategySnapshot.Stages {
+        // Direct status modification
+        updateRun.Status.StagesStatus = stagesStatus
+    }
+}
+```
+
+**After**:
+```go
+func (r *Reconciler) computeRunStageStatus(
+    ctx context.Context,
+    scheduledBindings []placementv1beta1.BindingObj,
+    updateRun placementv1beta1.StagedUpdateRunObj,
+) error {
+    // Interface-based access
+    updateRunSpec := updateRun.GetStagedUpdateRunSpec()
+    updateRunStatus := updateRun.GetStagedUpdateRunStatus()
+    updateStrategyName := updateRunSpec.StagedUpdateStrategyName
+    bindingSpec := binding.GetBindingSpec()
+    allSelectedClusters[bindingSpec.TargetCluster] = struct{}{}
+    for _, stage := range updateRunStatus.StagedUpdateStrategySnapshot.Stages {
+        // Interface-based status modification
+        updateRunStatus.StagesStatus = stagesStatus
+        updateRun.SetStagedUpdateRunStatus(*updateRunStatus)
+    }
+}
+```
+
+**Key Improvements**:
+1. **Generic Interface Parameters**: Uses `[]BindingObj` and `StagedUpdateRunObj` instead of concrete types
+2. **Interface-Based Access**: Uses `GetStagedUpdateRunSpec()`, `GetStagedUpdateRunStatus()`, `GetBindingSpec()` 
+3. **Interface-Based Status Updates**: Uses `SetStagedUpdateRunStatus()` instead of direct field assignment
+4. **Type Conversion Integration**: Uses `controller.ConvertCRBArrayToBindingObjs()` in caller
+5. **Generic Logging**: Updated terminology from cluster-specific to generic
+
+**Integration**: The `generateStagesByStrategy` function now converts concrete binding arrays to interfaces before calling `computeRunStageStatus`, maintaining compatibility while enabling interface-based processing.
+
 ## Current Status
 - ✅ `validatePlacement`: Fully generic, uses utility functions and interfaces
 - ✅ `determinePolicySnapshot`: Fully generic, uses utility functions and interfaces, unnecessary switch removed
 - ✅ `collectScheduledClusters`: Fully generic, uses utility functions and interfaces
+- ✅ `computeRunStageStatus`: Fully generic, uses interface-based access patterns
 - ⚠️ `initialize`: Still takes concrete ClusterStagedUpdateRun type, but now calls interface-based functions
+- ⚠️ `generateStagesByStrategy`: Still takes concrete types but converts to interfaces for `computeRunStageStatus`
