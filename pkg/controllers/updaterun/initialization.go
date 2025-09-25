@@ -27,6 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -44,8 +45,8 @@ func (r *Reconciler) initialize(
 	ctx context.Context,
 	updateRun *placementv1beta1.ClusterStagedUpdateRun,
 ) ([]*placementv1beta1.ClusterResourceBinding, []*placementv1beta1.ClusterResourceBinding, error) {
-	// Validate the ClusterResourcePlace object referenced by the ClusterStagedUpdateRun.
-	placementName, err := r.validateCRP(ctx, updateRun)
+	// Validate the Placement object referenced by the StagedUpdateRun.
+	placementName, err := r.validatePlacement(ctx, updateRun)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -71,29 +72,48 @@ func (r *Reconciler) initialize(
 	return scheduledBindings, toBeDeletedBindings, r.recordInitializationSucceeded(ctx, updateRun)
 }
 
-// validateCRP validates the ClusterResourcePlacement object referenced by the ClusterStagedUpdateRun.
-func (r *Reconciler) validateCRP(ctx context.Context, updateRun *placementv1beta1.ClusterStagedUpdateRun) (string, error) {
+// validatePlacement validates the Placement object (CRP or RP) referenced by the StagedUpdateRun.
+func (r *Reconciler) validatePlacement(ctx context.Context, updateRun placementv1beta1.StagedUpdateRunObj) (string, error) {
 	updateRunRef := klog.KObj(updateRun)
-	// Fetch the ClusterResourcePlacement object.
-	placementName := updateRun.Spec.PlacementName
-	var crp placementv1beta1.ClusterResourcePlacement
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: placementName}, &crp); err != nil {
-		klog.ErrorS(err, "Failed to get ClusterResourcePlacement", "clusterResourcePlacement", placementName, "clusterStagedUpdateRun", updateRunRef)
+
+	// Get placement name from the updateRun spec using interface methods
+	placementName := updateRun.GetStagedUpdateRunSpec().PlacementName
+
+	// Create NamespacedName for the placement
+	// For ClusterStagedUpdateRun, namespace will be empty (cluster-scoped)
+	// For StagedUpdateRun, namespace will be the actual namespace (namespace-scoped)
+	namespacedName := types.NamespacedName{
+		Name:      placementName,
+		Namespace: updateRun.GetNamespace(),
+	}
+
+	// Fetch the placement object using the utility function
+	// This automatically determines whether to fetch CRP or RP based on namespace presence
+	placement, err := controller.FetchPlacementFromNamespacedName(ctx, r.Client, namespacedName)
+	if err != nil {
 		if apierrors.IsNotFound(err) {
-			// we won't continue or retry the initialization if the ClusterResourcePlacement is not found.
-			crpNotFoundErr := controller.NewUserError(fmt.Errorf("parent clusterResourcePlacement not found"))
-			return "", fmt.Errorf("%w: %s", errInitializedFailed, crpNotFoundErr.Error())
+			placementNotFoundErr := controller.NewUserError(fmt.Errorf("parent placement not found"))
+			klog.ErrorS(err, "Failed to get placement", "placement", placementName, "namespace", updateRun.GetNamespace(), "stagedUpdateRun", updateRunRef)
+			return "", fmt.Errorf("%w: %s", errInitializedFailed, placementNotFoundErr.Error())
 		}
+		klog.ErrorS(err, "Failed to get placement", "placement", placementName, "namespace", updateRun.GetNamespace(), "stagedUpdateRun", updateRunRef)
 		return "", controller.NewAPIServerError(true, err)
 	}
-	// Check if the ClusterResourcePlacement has an external rollout strategy.
-	if crp.Spec.Strategy.Type != placementv1beta1.ExternalRolloutStrategyType {
-		klog.V(2).InfoS("The clusterResourcePlacement does not have an external rollout strategy", "clusterResourcePlacement", placementName, "clusterStagedUpdateRun", updateRunRef)
-		wrongRolloutTypeErr := controller.NewUserError(errors.New("parent clusterResourcePlacement does not have an external rollout strategy, current strategy: " + string(crp.Spec.Strategy.Type)))
+
+	// Check if the Placement has an external rollout strategy using interface methods
+	placementSpec := placement.GetPlacementSpec()
+	if placementSpec.Strategy.Type != placementv1beta1.ExternalRolloutStrategyType {
+		klog.V(2).InfoS("The placement does not have an external rollout strategy", "placement", placementName, "namespace", updateRun.GetNamespace(), "stagedUpdateRun", updateRunRef)
+		wrongRolloutTypeErr := controller.NewUserError(errors.New("parent placement does not have an external rollout strategy, current strategy: " + string(placementSpec.Strategy.Type)))
 		return "", fmt.Errorf("%w: %s", errInitializedFailed, wrongRolloutTypeErr.Error())
 	}
-	updateRun.Status.ApplyStrategy = crp.Spec.Strategy.ApplyStrategy
-	return crp.Name, nil
+
+	// Update the apply strategy in the updateRun status using interface methods
+	updateRunStatus := updateRun.GetStagedUpdateRunStatus()
+	updateRunStatus.ApplyStrategy = placementSpec.Strategy.ApplyStrategy
+	updateRun.SetStagedUpdateRunStatus(*updateRunStatus)
+
+	return placementName, nil
 }
 
 // determinePolicySnapshot retrieves the latest policy snapshot associated with the ClusterResourcePlacement,
